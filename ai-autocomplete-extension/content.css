@@ -1,0 +1,43 @@
+/* Ghost suggestion overlay for plain <input>/<textarea> elements.
+   Positioned absolutely on top of the page; never intercepts pointer events. */
+.aic-ghost-overlay {
+  position: absolute;
+  z-index: 2147483647;
+  pointer-events: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: rgba(120, 120, 120, 0.75);
+  white-space: pre;
+  overflow: hidden;
+  will-change: left, top;
+}
+
+/* Ghost suggestion span injected directly for contenteditable elements. */
+.aic-ghost-inline {
+  color: rgba(120, 120, 120, 0.75);
+  opacity: 0.85;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Small "Tab to accept" hint chip, shown next to the suggestion. */
+.aic-hint-chip {
+  position: absolute;
+  z-index: 2147483647;
+  pointer-events: none;
+  background: rgba(30, 30, 30, 0.85);
+  color: #fff;
+  font: 500 10px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  transform: translateY(-2px);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.aic-hint-chip.aic-visible {
+  opacity: 1;
+}
