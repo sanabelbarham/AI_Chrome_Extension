@@ -3,20 +3,22 @@
   'use strict';
 
   // ---------- Config ----------
-  const DEBOUNCE_MS = 300;          // wait after typing stops before requesting a suggestion
-  const MIN_CHARS_BEFORE_SUGGEST = 3; // don't bother suggesting on 1-2 characters
-  const MAX_CONTEXT_CHARS = 2000;   // cap how much text we send to the AI, for latency/cost
+  const DEBOUNCE_MS = 300;
+  const MIN_CHARS_BEFORE_SUGGEST = 3;
+  const MAX_CONTEXT_CHARS = 2000;
 
   // ---------- State ----------
-  let currentTarget = null;   // the field currently focused
-  let currentSuggestion = ''; // the ghost text currently shown
+  let currentTarget = null;
+  let currentSuggestion = '';
   let debounceTimer = null;
-  let activeRequestId = 0;    // used to ignore stale/late API responses
+  let activeRequestId = 0;
   let enabled = true;
+  let ghostOverlayEl = null;
+  let ghostInlineEl = null;
 
   // ---------- Load settings ----------
   chrome.storage.sync.get(['enabled'], (res) => {
-    enabled = res.enabled !== false; // default: on
+    enabled = res.enabled !== false;
   });
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.enabled) {
@@ -28,24 +30,16 @@
   // ---------- Field detection ----------
   function isEditable(el) {
     if (!el || !(el instanceof Element)) return false;
-
     const tag = el.tagName;
-
     if (tag === 'TEXTAREA') return true;
-
     if (tag === 'INPUT') {
       const type = (el.getAttribute('type') || 'text').toLowerCase();
-      // only plain text-like inputs — never passwords, numbers, dates, etc.
       return ['text', 'search', 'email', 'url'].includes(type);
     }
-
     if (el.isContentEditable) return true;
-
     return false;
   }
 
-  // Some sites (Slack, Notion, Gmail) fire focus on a wrapper div, not the
-  // actual contenteditable node. Walk up/down a little to find the real one.
   function resolveEditableTarget(el) {
     if (isEditable(el)) return el;
     if (el && el.closest) {
@@ -56,7 +50,6 @@
   }
 
   // ---------- Event listeners ----------
-  // Capture phase (`true`) so we see events even if the page stops propagation.
   document.addEventListener('focusin', onFocusIn, true);
   document.addEventListener('focusout', onFocusOut, true);
   document.addEventListener('input', onInput, true);
@@ -82,17 +75,14 @@
     if (!enabled) return;
     const target = resolveEditableTarget(e.target);
     if (!target) return;
-
     currentTarget = target;
-    clearSuggestion(); // typing invalidates whatever ghost text was showing
+    clearSuggestion();
     scheduleSuggestion(target);
   }
 
   function onScrollOrResize() {
-    // Ghost overlay position is pixel-based, so it must be re-synced
-    // whenever the page or field scrolls/resizes.
-    if (currentSuggestion && currentTarget) {
-      repositionGhost(currentTarget);
+    if (currentSuggestion && currentTarget && ghostOverlayEl) {
+      positionOverlayGhost(currentTarget);
     }
   }
 
@@ -101,19 +91,14 @@
     debounceTimer = setTimeout(() => requestSuggestion(el), DEBOUNCE_MS);
   }
 
-// ---------- Requesting a suggestion ----------
+  // ---------- Requesting a suggestion ----------
   function getTextAndCaret(el) {
     if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
       const value = el.value || '';
       const caret = el.selectionStart ?? value.length;
-      return {
-        prefix: value.slice(0, caret),
-        suffix: value.slice(caret),
-        caret
-      };
+      return { prefix: value.slice(0, caret), suffix: value.slice(caret), caret };
     }
 
-    // contenteditable: use the Selection API to split text at the caret
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return { prefix: '', suffix: '', caret: 0 };
 
@@ -135,31 +120,21 @@
     if (!enabled || el !== currentTarget) return;
 
     const { prefix, suffix } = getTextAndCaret(el);
-
-    // Don't bother the API for trivial/empty input, or if caret isn't at
-    // the end of a "word" (avoids weird mid-word suggestions on every field).
     const trimmedPrefix = prefix.slice(-MAX_CONTEXT_CHARS);
+
     if (trimmedPrefix.trim().length < MIN_CHARS_BEFORE_SUGGEST) return;
-if (suffix.trim().length > 0) return; // only suggest when cursor is at the very end
+    if (suffix.trim().length > 0) return;
 
     const requestId = ++activeRequestId;
 
     chrome.runtime.sendMessage(
-      {
-        type: 'GET_SUGGESTION',
-        prefix: trimmedPrefix,
-        suffix: suffix.slice(0, 200),
-        url: location.hostname
-      },
+      { type: 'GET_SUGGESTION', prefix: trimmedPrefix, suffix: suffix.slice(0, 200), url: location.hostname },
       (response) => {
-        // Ignore replies for requests that are no longer the latest one —
-        // this is what keeps fast typers from seeing stale suggestions.
         if (requestId !== activeRequestId) return;
-        if (chrome.runtime.lastError) return; // extension context gone, etc.
+        if (chrome.runtime.lastError) return;
         if (!response || !response.suggestion) return;
         if (el !== currentTarget) return;
 
-        // Re-check the field hasn't changed underneath us while we waited.
         const { prefix: nowPrefix } = getTextAndCaret(el);
         if (nowPrefix !== trimmedPrefix) return;
 
@@ -173,12 +148,9 @@ if (suffix.trim().length > 0) return; // only suggest when cursor is at the very
     currentSuggestion = '';
     removeGhostOverlay();
     removeGhostInline();
-    hideHintChip();
   }
 
-  let ghostOverlayEl = null;   // for textarea/input
-  let ghostInlineEl = null;    // for contenteditable
-
+  // ---------- Showing a suggestion ----------
   function showSuggestion(el, suggestion) {
     if (!suggestion || !suggestion.trim()) return;
     currentSuggestion = suggestion;
@@ -190,8 +162,6 @@ if (suffix.trim().length > 0) return; // only suggest when cursor is at the very
     }
   }
 
-  // Copies just the styles that affect how text looks/wraps,
-  // so the overlay's text lines up with the real field's text.
   const FONT_STYLE_PROPS = [
     'fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing',
     'lineHeight', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
@@ -211,7 +181,6 @@ if (suffix.trim().length > 0) return; // only suggest when cursor is at the very
     });
     overlay.style.whiteSpace = el.tagName === 'TEXTAREA' ? 'pre-wrap' : 'pre';
 
-    // Typed text stays invisible (just a spacer), suggestion shows in gray.
     const typedSpan = document.createElement('span');
     typedSpan.style.color = 'transparent';
     typedSpan.textContent = el.value;
@@ -231,7 +200,6 @@ if (suffix.trim().length > 0) return; // only suggest when cursor is at the very
   function positionOverlayGhost(el) {
     if (!ghostOverlayEl) return;
     const rect = el.getBoundingClientRect();
-
     ghostOverlayEl.style.left = `${window.scrollX + rect.left}px`;
     ghostOverlayEl.style.top = `${window.scrollY + rect.top}px`;
     ghostOverlayEl.style.width = `${rect.width}px`;
@@ -245,19 +213,13 @@ if (suffix.trim().length > 0) return; // only suggest when cursor is at the very
     }
   }
 
-
-  // --- contenteditable: insert a real ghost <span> after your text ---
   function renderInlineGhost(el, suggestion) {
     removeGhostInline();
-
     const span = document.createElement('span');
     span.className = 'aic-ghost-inline';
     span.textContent = suggestion;
     span.setAttribute('data-aic-ghost', 'true');
-    span.contentEditable = 'false'; // stops you from typing directly into it
-
-    // Since we only suggest at the very end of your text (our simplified
-    // rule), we can just append the ghost span to the end of the element.
+    span.contentEditable = 'false';
     el.appendChild(span);
     ghostInlineEl = span;
   }
@@ -267,6 +229,40 @@ if (suffix.trim().length > 0) return; // only suggest when cursor is at the very
       ghostInlineEl.remove();
     }
     ghostInlineEl = null;
+  }
+
+  // ---------- Keyboard handling ----------
+  function onKeyDown(e) {
+    if (!currentSuggestion || !currentTarget) return;
+    if (e.target !== currentTarget) return;
+
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      acceptSuggestion(currentTarget);
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      clearSuggestion();
+      return;
+    }
+
+    clearSuggestion();
+  }
+
+  function acceptSuggestion(el) {
+    const suggestion = currentSuggestion;
+    clearSuggestion();
+
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+      const newValue = el.value + suggestion;
+      el.value = newValue;
+      const newCaret = newValue.length;
+      el.setSelectionRange(newCaret, newCaret);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      document.execCommand('insertText', false, suggestion);
+    }
   }
 
 })();
